@@ -1238,6 +1238,11 @@ object StateStore extends Logging {
   }
   // scalastyle:on
 
+  /*
+   * @return (StateStoreProvider, shouldForceSnapshotUpload)
+   *         shouldForceSnapshotUpload is true if the state store provider is lagging
+   *         behind in snapshot uploads and should force a snapshot upload on next commit.
+   */
   private def getStateStoreProvider(
       storeProviderId: StateStoreProviderId,
       keySchema: StructType,
