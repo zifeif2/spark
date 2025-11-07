@@ -290,7 +290,7 @@ private class StateStoreCoordinator(
     sqlConf.stateStoreCoordinatorReportSnapshotUploadLag
 
   private def forceSnapshotUploadOnLag: Boolean =
-    sqlConf.forceSnapshotUploadOnLag
+    sqlConf.stateStoreForceSnapshotUploadOnLag
 
   private def coordinatorLagReportInterval: Long =
     sqlConf.stateStoreCoordinatorSnapshotLagReportInterval
@@ -343,7 +343,9 @@ private class StateStoreCoordinator(
       // Remove the corresponding run id entries for report time and starting time
       lastFullSnapshotLagReportTimeMs -= runId
       // Remove the corresponding run id entries for snapshot upload lagging stores
-      snapshotUploadLaggingStores.remove(runId)
+      if (forceSnapshotUploadOnLag) {
+        snapshotUploadLaggingStores.remove(runId)
+      }
       logDebug(s"Deactivating instances related to checkpoint location $runId: " +
         storeIdsToRemove.mkString(", "))
       context.reply(true)
@@ -352,12 +354,8 @@ private class StateStoreCoordinator(
       // Ignore this upload event if the registered latest version for the store is more recent,
       // since it's possible that an older version gets uploaded after a new executor uploads for
       // the same state store but with a newer snapshot.
-      logDebug(s"Snapshot version $version was uploaded for state store $providerId")
       if (!stateStoreLatestUploadedSnapshot.get(providerId).exists(_.version >= version)) {
         stateStoreLatestUploadedSnapshot.put(providerId, SnapshotUploadEvent(version, timestamp))
-        if (forceSnapshotUploadOnLag) {
-          snapshotUploadLaggingStores.get(providerId.queryRunId).foreach(_.remove(providerId))
-        }
       }
       context.reply(true)
 
@@ -517,6 +515,10 @@ private class StateStoreCoordinator(
         // Mark a state store as lagging if it's behind in both version and time.
         // A state store is considered lagging if it's behind in both version and time according
         // to the configured thresholds.
+        println(s"referenceVersion: $referenceVersion")
+        println(s"latestSnapshot.version: ${latestSnapshot.version}")
+        println(s"minVersionDeltaForLogging: $minVersionDeltaForLogging")
+
         val isBehindOnVersions =
           referenceVersion - latestSnapshot.version > minVersionDeltaForLogging
         val isBehindOnTime =
