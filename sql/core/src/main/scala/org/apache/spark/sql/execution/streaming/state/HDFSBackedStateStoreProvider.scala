@@ -75,7 +75,7 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
   private val providerName = "HDFSBackedStateStoreProvider"
 
   class HDFSBackedReadStateStore(val version: Long, map: HDFSBackedStateStoreMap)
-    extends ReadStateStore {
+    extends ReadStateStore with SupportsRawBytesRead {
 
     override def id: StateStoreId = HDFSBackedStateStoreProvider.this.stateStoreId
 
@@ -84,6 +84,14 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
     override def iterator(colFamilyName: String): StateStoreIterator[UnsafeRowPair] = {
       val iter = map.iterator()
       new StateStoreIterator(iter)
+    }
+
+    override def rawIterator(colFamilyName: String): Iterator[(Array[Byte], Array[Byte])] = {
+      // For HDFS, we get UnsafeRows and convert them to bytes
+      // The bytes will be properly aligned since they come from valid UnsafeRows
+      map.iterator().map { pair =>
+        (pair.key.getBytes(), pair.value.getBytes())
+      }
     }
 
     override def abort(): Unit = {}
@@ -110,7 +118,7 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
   class HDFSBackedStateStore(
       val version: Long,
       private val mapToUpdate: HDFSBackedStateStoreMap)
-    extends StateStore {
+    extends StateStore with SupportsRawBytesRead {
 
     /** Trait and classes representing the internal state of the store */
     trait STATE
@@ -236,6 +244,15 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
       assertUseOfDefaultColFamily(colFamilyName)
       val iter = mapToUpdate.iterator()
       new StateStoreIterator(iter)
+    }
+
+    override def rawIterator(colFamilyName: String): Iterator[(Array[Byte], Array[Byte])] = {
+      assertUseOfDefaultColFamily(colFamilyName)
+      // For HDFS, we get UnsafeRows and convert them to bytes
+      // The bytes will be properly aligned since they come from valid UnsafeRows
+      mapToUpdate.iterator().map { pair =>
+        (pair.key.getBytes(), pair.value.getBytes())
+      }
     }
 
     override def prefixScan(

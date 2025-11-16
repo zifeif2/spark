@@ -46,7 +46,8 @@ private[sql] class RocksDBStateStoreProvider
   class RocksDBStateStore(
       lastVersion: Long,
       private[RocksDBStateStoreProvider] val stamp: Long,
-      private[RocksDBStateStoreProvider] var readOnly: Boolean) extends StateStore {
+      private[RocksDBStateStoreProvider] var readOnly: Boolean) extends StateStore
+    with SupportsRawBytesRead {
 
     private sealed trait OPERATION
     private case object UPDATE extends OPERATION
@@ -63,7 +64,7 @@ private[sql] class RocksDBStateStoreProvider
     case object RELEASED extends STATE
 
     @volatile private var state: STATE = UPDATING
-    @volatile private var isValidated = false
+    @volatile private var isValidated = true
 
     /**
      * Map defining all valid state transitions for the RocksDB state store.
@@ -415,6 +416,21 @@ private[sql] class RocksDBStateStoreProvider
         }
 
         new StateStoreIterator(iter, rocksDbIter.closeIfNeeded)
+      }
+    }
+
+    override def rawIterator(colFamilyName: String): Iterator[(Array[Byte], Array[Byte])] = {
+      validateAndTransitionState(UPDATE)
+      verifyColFamilyOperations("rawIterator", colFamilyName)
+
+      if (useColumnFamilies) {
+        rocksDB.iterator(colFamilyName).map { pair =>
+          (pair.key, pair.value)
+        }
+      } else {
+        rocksDB.iterator().map { pair =>
+          (pair.key, pair.value)
+        }
       }
     }
 

@@ -83,14 +83,20 @@ object SchemaUtil {
     row
   }
 
-  def unifyStateRowPairAsBytes(
-      colFamilyName: String,
-      pair: (UnsafeRow, UnsafeRow),
-      partition: Int): InternalRow = {
+  /**
+   * Creates a unified row from raw key and value bytes.
+   * This is an alias for unifyStateRowPairAsBytes that takes individual byte arrays
+   * instead of a tuple for better readability.
+   */
+  def unifyStateRowPairAsRawBytes(
+      partition: Int,
+      keyBytes: Array[Byte],
+      valueBytes: Array[Byte],
+      colFamilyName: String): InternalRow = {
     val row = new GenericInternalRow(4)
     row.update(0, partition)
-    row.update(1, pair._1.getBytes())
-    row.update(2, pair._2.getBytes())
+    row.update(1, keyBytes)
+    row.update(2, valueBytes)
     row.update(3, UTF8String.fromString(colFamilyName))
     row
   }
@@ -384,7 +390,6 @@ object SchemaUtil {
         }
 
       case TimerState =>
-        println("here is the timer state")
         val groupingKeySchema = SchemaUtil.getSchemaAsDataType(
           stateStoreColFamilySchema.keySchema, "key")
         new StructType()

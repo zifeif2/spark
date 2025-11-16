@@ -20,12 +20,15 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeRow}
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
+import org.apache.spark.sql.execution.datasources.v2.state.metadata.StateMetadataPartitionReader
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
+import org.apache.spark.sql.execution.streaming.operators.stateful.StatefulOperatorsUtils
+import org.apache.spark.sql.execution.streaming.operators.stateful.join.StreamingSymmetricHashJoinHelper.{LeftSide, RightSide}
 import org.apache.spark.sql.execution.streaming.operators.stateful.join.SymmetricHashJoinStateManager
-import org.apache.spark.sql.execution.streaming.operators.stateful.transformwithstate.{StateVariableType, TransformWithStateVariableInfo}
+import org.apache.spark.sql.execution.streaming.operators.stateful.transformwithstate.{StateVariableType, TransformWithStateOperatorProperties, TransformWithStateVariableInfo}
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.execution.streaming.state.RecordType.{getRecordTypeAsString, RecordType}
-import org.apache.spark.sql.types.{NullType, StructField, StructType}
+import org.apache.spark.sql.types.{BinaryType, NullType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.{NextIterator, SerializableConfiguration}
 
@@ -88,7 +91,7 @@ abstract class StatePartitionReaderBase(
     if (SchemaUtil.checkVariableType(stateVariableInfoOpt, StateVariableType.MapState)) {
       SchemaUtil.getCompositeKeySchema(schema, partition.sourceOptions)
     } else if (partition.sourceOptions.readAllColumnFamilies) {
-      new StructType()
+      new StructType().add("keyBytes", BinaryType, nullable = false)
     } else {
       SchemaUtil.getSchemaAsDataType(schema, "key").asInstanceOf[StructType]
     }
@@ -97,7 +100,7 @@ abstract class StatePartitionReaderBase(
   protected val valueSchema = if (stateVariableInfoOpt.isDefined) {
     schemaForValueRow
   } else if (partition.sourceOptions.readAllColumnFamilies) {
-    new StructType()
+    new StructType().add("valueBytes", BinaryType, nullable = false)
   } else {
     SchemaUtil.getSchemaAsDataType(
       schema, "value").asInstanceOf[StructType]
@@ -223,7 +226,6 @@ class StatePartitionReader(
     val colFamilyName = stateStoreColFamilySchemaOpt
       .map(_.colFamilyName).getOrElse(
         joinColFamilyOpt.getOrElse(StateStore.DEFAULT_COL_FAMILY_NAME))
-
     if (stateVariableInfoOpt.isDefined) {
       val stateVariableInfo = stateVariableInfoOpt.get
       val stateVarType = stateVariableInfo.stateVariableType
@@ -265,31 +267,109 @@ class StatePartitionReaderAllColumnFamilies(
     )
   }
 
-  override lazy val iter: Iterator[InternalRow] = {
-    // Read the state schema to get the list of column families
-    // Use the provider's stateStoreId and modify only the partition for schema checking
-    val schemaCheckStoreId = store.id
-    val schemaCheckProviderId = StateStoreProviderId(schemaCheckStoreId, partition.queryId)
-    val schemaChecker = new StateSchemaCompatibilityChecker(
-      schemaCheckProviderId,
-      hadoopConf.value)
-    val stateSchemas = schemaChecker.readSchemaFile()
+  val allStateStoreMetadata = {
+    new StateMetadataPartitionReader(
+      partition.sourceOptions.resolvedCpLocation,
+      new SerializableConfiguration(hadoopConf.value),
+      partition.sourceOptions.batchId).stateMetadata.toArray
+  }
 
-    // Iterate through all column families and return rows in binary format
-    stateSchemas.iterator.flatMap { colFamilySchema =>
-      val colFamilyName = colFamilySchema.colFamilyName
-      store.iterator(colFamilyName).map { pair =>
-        SchemaUtil.unifyStateRowPairAsBytes(
-          colFamilyName,
-          (pair.key, pair.value),
-          partition.partition)
+   val colFamilyNames = allStateStoreMetadata.head.operatorName match {
+     case opName: String if opName == StatefulOperatorsUtils.SYMMETRIC_HASH_JOIN_EXEC_OP_NAME =>
+       // Only v3 uses column families; v2 uses separate state stores
+       // Note: operatorStateMetadataVersion == 2 corresponds to join V3 (with column families)
+       //       operatorStateMetadataVersion == 1 corresponds to join V2 (separate state stores)
+       val operatorStateMetadataVersion = allStateStoreMetadata.head.version
+
+       if (operatorStateMetadataVersion == 2) {
+         // v3: Single state store with 4 column families
+         SymmetricHashJoinStateManager.allStateStoreNames(LeftSide, RightSide)
+       } else {
+         // v2: 4 separate state stores, not column families
+         Seq[String]()
+       }
+     case opName: String if StatefulOperatorsUtils.TRANSFORM_WITH_STATE_OP_NAMES
+       .contains(opName) =>
+       val operatorProperties = TransformWithStateOperatorProperties
+         .fromJson(allStateStoreMetadata.head.operatorPropertiesJson)
+
+       val userStateVariables = operatorProperties.stateVariables
+         .map(variable => variable.stateName)
+
+       // Add internal column families for timers
+       val timerCFs = {
+         val timeMode = operatorProperties.timeMode
+         if (timeMode == "ProcessingTime" || timeMode == "EventTime") {
+           val baseTimerName = if (timeMode == "ProcessingTime") {
+             "$procTimers"
+           } else {
+             "$eventTimers"
+           }
+           Seq(
+             baseTimerName + "_keyToTimestamp",
+             baseTimerName + "_timestampToKey"
+           )
+         } else {
+           Seq.empty[String]
+         }
+       }
+
+       // Add TTL column families for TTL-enabled state variables
+       val ttlCFs = operatorProperties.stateVariables
+         .filter(_.ttlEnabled)
+         .map(variable => "$ttl_" + variable.stateName)
+
+       // Add row counter column families for list states
+       val rowCounterCFs = operatorProperties.stateVariables
+         .filter(_.stateVariableType == StateVariableType.ListState)
+         .map(variable => "$rowCounter_" + variable.stateName)
+
+       userStateVariables ++ timerCFs ++ ttlCFs ++ rowCounterCFs
+     case _ =>
+       Seq[String]()
+   }
+
+  override protected lazy val provider: StateStoreProvider = {
+    val stateStoreId = StateStoreId(partition.sourceOptions.stateCheckpointLocation.toString,
+      partition.sourceOptions.operatorId, partition.partition, partition.sourceOptions.storeName)
+    val stateStoreProviderId = StateStoreProviderId(stateStoreId, partition.queryId)
+
+    val keyStateEncoderSpec = NoPrefixKeyStateEncoderSpec(keySchema)
+    val provider = StateStoreProvider.createAndInit(
+      stateStoreProviderId, keySchema, valueSchema, keyStateEncoderSpec,
+      useColumnFamilies = colFamilyNames.nonEmpty, storeConf, hadoopConf.value, false, None)
+
+    provider
+  }
+
+  override lazy val iter: Iterator[InternalRow] = {
+    require(store.isInstanceOf[SupportsRawBytesRead],
+      s"State store ${store.getClass.getName} does not support raw bytes reading")
+
+    val rawStore = store.asInstanceOf[SupportsRawBytesRead]
+    if (colFamilyNames.isEmpty) {
+      rawStore
+        .rawIterator()
+        .map { case (keyBytes, valueBytes) =>
+          SchemaUtil.unifyStateRowPairAsRawBytes(partition.partition, keyBytes, valueBytes, null)
+        }
+    } else {
+      colFamilyNames.iterator.flatMap { colFamilyName =>
+        rawStore
+          .rawIterator(colFamilyName)
+          .map { case (keyBytes, valueBytes) =>
+            SchemaUtil.unifyStateRowPairAsRawBytes(partition.partition,
+              keyBytes,
+              valueBytes,
+              colFamilyName)
+          }
       }
     }
   }
 
   override def close(): Unit = {
     super.close()
-    store.release()
+//    store.release()
   }
 }
 

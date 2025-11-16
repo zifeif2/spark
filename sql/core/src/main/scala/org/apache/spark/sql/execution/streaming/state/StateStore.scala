@@ -889,6 +889,23 @@ object StateStoreProvider extends Logging {
 }
 
 /**
+ * Trait for state stores that support reading raw bytes without decoding.
+ * This is useful for copying state data between stores or for backup purposes.
+ * The format of the bytes is provider-specific:
+ * - RocksDB: [version byte][UnsafeRow bytes]
+ * - HDFS: UnsafeRow.getBytes()
+ */
+trait SupportsRawBytesRead {
+  /**
+   * Returns an iterator of raw key-value bytes for a column family.
+   * @param colFamilyName the name of the column family to iterate over
+   * @return an iterator of (keyBytes, valueBytes) tuples
+   */
+  def rawIterator(colFamilyName: String = StateStore.DEFAULT_COL_FAMILY_NAME):
+    Iterator[(Array[Byte], Array[Byte])]
+}
+
+/**
  * This is an optional trait to be implemented by [[StateStoreProvider]]s that can read the change
  * of state store over batches. This is used by State Data Source with additional options like
  * snapshotStartBatchId or readChangeFeed.
