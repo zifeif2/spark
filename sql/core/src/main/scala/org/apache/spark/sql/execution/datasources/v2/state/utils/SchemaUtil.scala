@@ -129,7 +129,6 @@ object SchemaUtil {
       compositeKeySchema: StructType,
       partitionId: Int,
       stateSourceOptions: StateSourceOptions): Iterator[InternalRow] = {
-    println("in unifyMapStateRowPair" + compositeKeySchema)
     val groupingKeySchema = SchemaUtil.getSchemaAsDataType(
       compositeKeySchema, "key"
     ).asInstanceOf[StructType]

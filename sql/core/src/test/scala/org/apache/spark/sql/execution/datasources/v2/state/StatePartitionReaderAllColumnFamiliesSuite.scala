@@ -261,7 +261,7 @@ class StatePartitionReaderAllColumnFamiliesSuite extends StateDataSourceTestBase
       }
     }
   }
-
+//
 //  test("read all column families with processing time timers") {
 //    withTempDir { tempDir =>
 //      withSQLConf(
@@ -368,11 +368,17 @@ class StatePartitionReaderAllColumnFamiliesSuite extends StateDataSourceTestBase
           StopStream
         )
 
-        // v2 uses 4 separate state stores, not column families
-        // So reading with readAllColumnFamilies should return default column family
-        // Each side stores 2 keys, but we're only reading from one state store (operatorId 0)
-        verifyStateData(tempDir.getAbsolutePath, expectedRowCount = 4,
-          expectedColumnFamilies = Seq(null))
+        // v2 uses 4 separate state stores (not column families within a single store)
+        // StatePartitionReaderAllColumnFamilies reads from all 4 stores
+        // and returns store names as column family names
+        // 2 keys * 4 stores (left-keyToNumValues, left-keyWithIndexToValue,
+        //                     right-keyToNumValues, right-keyWithIndexToValue) = 8 rows
+        verifyStateData(tempDir.getAbsolutePath, expectedRowCount = 8,
+          expectedColumnFamilies = Seq(
+            "left-keyToNumValues",
+            "left-keyWithIndexToValue",
+            "right-keyToNumValues",
+            "right-keyWithIndexToValue"))
       }
     }
   }

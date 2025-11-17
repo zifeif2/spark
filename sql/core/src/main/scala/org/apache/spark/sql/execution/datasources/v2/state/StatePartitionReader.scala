@@ -16,6 +16,8 @@
  */
 package org.apache.spark.sql.execution.datasources.v2.state
 
+import scala.collection.immutable.ArraySeq
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeRow}
@@ -258,7 +260,55 @@ class StatePartitionReaderAllColumnFamilies(
   extends StatePartitionReaderBase(storeConf, hadoopConf, partition, schema,
     NoPrefixKeyStateEncoderSpec(new StructType()), None, None, None, None) {
 
+  val allStateStoreMetadata = {
+    new StateMetadataPartitionReader(
+      partition.sourceOptions.resolvedCpLocation,
+      new SerializableConfiguration(hadoopConf.value),
+      partition.sourceOptions.batchId).stateMetadata.toArray
+  }
+
+  // Determine if this is join v2 (multiple stores) or uses column families (single store)
+  private val isJoinV2 = allStateStoreMetadata.head.operatorName ==
+    StatefulOperatorsUtils.SYMMETRIC_HASH_JOIN_EXEC_OP_NAME &&
+    allStateStoreMetadata.head.version == 1
+
+  // For join v2: Store read stores for all 4 separate stores
+  private lazy val joinV2Stores: Seq[(String, ReadStateStore)] = {
+    if (isJoinV2) {
+      ArraySeq.unsafeWrapArray(allStateStoreMetadata).map { stateMetadata =>
+        val storeName = stateMetadata.stateStoreName
+
+        // Create provider for this specific store
+        val stateStoreId = StateStoreId(
+          partition.sourceOptions.stateCheckpointLocation.toString,
+          partition.sourceOptions.operatorId,
+          partition.partition,
+          storeName)
+        val stateStoreProviderId = StateStoreProviderId(stateStoreId, partition.queryId)
+
+        val keySchema = new StructType()
+        val valueSchema = new StructType()
+        val keyStateEncoderSpec = NoPrefixKeyStateEncoderSpec(keySchema)
+        val storeProvider = StateStoreProvider.createAndInit(
+          stateStoreProviderId, keySchema, valueSchema, keyStateEncoderSpec,
+          useColumnFamilies = false, storeConf, hadoopConf.value, false, None)
+
+        val readStore = storeProvider.getReadStore(
+          partition.sourceOptions.batchId + 1,
+          getStartStoreUniqueId)
+
+        require(readStore.isInstanceOf[SupportsRawBytesRead],
+          s"State store ${readStore.getClass.getName} does not support raw bytes reading")
+
+        (storeName, readStore)
+      }
+    } else {
+      Seq.empty
+    }
+  }
+
   private lazy val store: ReadStateStore = {
+    assert(!isJoinV2, "Join v2 uses multiple stores, not a single store")
     assert(getStartStoreUniqueId == getEndStoreUniqueId,
       "Start and end store unique IDs must be the same when reading all column families")
     provider.getReadStore(
@@ -267,14 +317,7 @@ class StatePartitionReaderAllColumnFamilies(
     )
   }
 
-  val allStateStoreMetadata = {
-    new StateMetadataPartitionReader(
-      partition.sourceOptions.resolvedCpLocation,
-      new SerializableConfiguration(hadoopConf.value),
-      partition.sourceOptions.batchId).stateMetadata.toArray
-  }
-
-   val colFamilyNames = allStateStoreMetadata.head.operatorName match {
+  val colFamilyNames = allStateStoreMetadata.head.operatorName match {
      case opName: String if opName == StatefulOperatorsUtils.SYMMETRIC_HASH_JOIN_EXEC_OP_NAME =>
        // Only v3 uses column families; v2 uses separate state stores
        // Note: operatorStateMetadataVersion == 2 corresponds to join V3 (with column families)
@@ -343,33 +386,52 @@ class StatePartitionReaderAllColumnFamilies(
   }
 
   override lazy val iter: Iterator[InternalRow] = {
-    require(store.isInstanceOf[SupportsRawBytesRead],
-      s"State store ${store.getClass.getName} does not support raw bytes reading")
-
-    val rawStore = store.asInstanceOf[SupportsRawBytesRead]
-    if (colFamilyNames.isEmpty) {
-      rawStore
-        .rawIterator()
-        .map { case (keyBytes, valueBytes) =>
-          SchemaUtil.unifyStateRowPairAsRawBytes(partition.partition, keyBytes, valueBytes, null)
+    if (isJoinV2) {
+      // Join v2: Read from all 4 separate state stores
+      joinV2Stores.iterator.flatMap { case (storeName, readStore) =>
+        val rawStore = readStore.asInstanceOf[SupportsRawBytesRead]
+        rawStore.rawIterator().map { case (keyBytes, valueBytes) =>
+          SchemaUtil.unifyStateRowPairAsRawBytes(
+            partition.partition, keyBytes, valueBytes, storeName)
         }
+      }
     } else {
-      colFamilyNames.iterator.flatMap { colFamilyName =>
+      // Single store with column families (join v3, transformWithState, or simple operators)
+      require(store.isInstanceOf[SupportsRawBytesRead],
+        s"State store ${store.getClass.getName} does not support raw bytes reading")
+
+      val rawStore = store.asInstanceOf[SupportsRawBytesRead]
+      if (colFamilyNames.isEmpty) {
         rawStore
-          .rawIterator(colFamilyName)
+          .rawIterator()
           .map { case (keyBytes, valueBytes) =>
-            SchemaUtil.unifyStateRowPairAsRawBytes(partition.partition,
-              keyBytes,
-              valueBytes,
-              colFamilyName)
+            SchemaUtil.unifyStateRowPairAsRawBytes(partition.partition, keyBytes, valueBytes, null)
           }
+      } else {
+        colFamilyNames.iterator.flatMap { colFamilyName =>
+          rawStore
+            .rawIterator(colFamilyName)
+            .map { case (keyBytes, valueBytes) =>
+              SchemaUtil.unifyStateRowPairAsRawBytes(partition.partition,
+                keyBytes,
+                valueBytes,
+                colFamilyName)
+            }
+        }
       }
     }
   }
 
   override def close(): Unit = {
     super.close()
-//    store.release()
+    if (isJoinV2) {
+      // Release all join v2 stores
+      joinV2Stores.foreach { case (_, readStore) =>
+        readStore.release()
+      }
+    } else {
+      store.release()
+    }
   }
 }
 

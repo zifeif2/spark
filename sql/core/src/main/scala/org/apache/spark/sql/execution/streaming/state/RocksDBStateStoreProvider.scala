@@ -64,7 +64,7 @@ private[sql] class RocksDBStateStoreProvider
     case object RELEASED extends STATE
 
     @volatile private var state: STATE = UPDATING
-    @volatile private var isValidated = true
+    @volatile private var isValidated = false
 
     /**
      * Map defining all valid state transitions for the RocksDB state store.
