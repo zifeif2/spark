@@ -21,8 +21,9 @@ import java.util
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.connector.catalog.{MetadataColumn, SupportsMetadataColumns, SupportsRead, Table, TableCapability}
+import org.apache.spark.sql.connector.catalog.{MetadataColumn, SupportsMetadataColumns, SupportsRead, SupportsWrite, Table, TableCapability}
 import org.apache.spark.sql.connector.read.ScanBuilder
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.JoinSideValues
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
 import org.apache.spark.sql.execution.streaming.operators.stateful.transformwithstate.TransformWithStateVariableInfo
@@ -46,7 +47,7 @@ class StateTable(
     stateStoreColFamilySchemaOpt: Option[StateStoreColFamilySchema],
     stateSchemaProviderOpt: Option[StateSchemaProvider],
     joinColFamilyOpt: Option[String])
-  extends Table with SupportsRead with SupportsMetadataColumns {
+  extends Table with SupportsRead with SupportsMetadataColumns with SupportsWrite {
 
   import StateTable._
 
@@ -89,6 +90,10 @@ class StateTable(
       stateVariableInfoOpt, stateStoreColFamilySchemaOpt, stateSchemaProviderOpt,
       joinColFamilyOpt)
 
+  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder =
+    new StateWriteBuilder(session, info, schema, sourceOptions, stateConf, keyStateEncoderSpec,
+      stateVariableInfoOpt, stateStoreColFamilySchemaOpt, stateSchemaProviderOpt)
+
   override def properties(): util.Map[String, String] = Map.empty[String, String].asJava
 
   override def metadataColumns(): Array[MetadataColumn] = Array.empty
@@ -99,5 +104,5 @@ class StateTable(
  * Currently storing capability of the table and the definition of metadata column(s).
  */
 object StateTable {
-  private val CAPABILITY = Set(TableCapability.BATCH_READ).asJava
+  private val CAPABILITY = Set(TableCapability.BATCH_READ, TableCapability.BATCH_WRITE).asJava
 }
