@@ -157,8 +157,9 @@ private class StateDataWriterFactory(
   extends DataWriterFactory with Logging {
 
   override def createWriter(partitionId: Int, taskId: Long): DataWriter[InternalRow] = {
-    logInfo(s"Creating StatePartitionAllColumnFamiliesWriter for partition $partitionId, task $taskId")
-    
+    logInfo(s"Creating StatePartitionAllColumnFamiliesWriter for partition" +
+      s"$partitionId, task $taskId")
+
     // Create a StateStoreInputPartition for this writer
     val queryId = UUID.randomUUID()
     val partition = new StateStoreInputPartition(partitionId, queryId, sourceOptions)

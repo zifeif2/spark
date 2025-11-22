@@ -187,23 +187,73 @@ class StatePartitionAllColumnFamiliesWriter(
     stateStoreColFamilySchemaOpt,
     stateSchemaProviderOpt) {
 
+  // Override schemas to use placeholder schemas since we're working with raw bytes
+  // The actual schemas are embedded in the bytes themselves in UnsafeRow format
+  private val placeholderSchema: StructType =
+    StructType(Array(StructField("__dummy__", NullType)))
+
+  override protected val keySchema: StructType = placeholderSchema
+  override protected val valueSchema: StructType = placeholderSchema
+
+  // Disable format validation because the schema returned by the reader
+  // does not contain the corresponding keySchema or valueSchema.
+  // We're working with raw bytes and placeholder schemas.
+  private val modifiedStoreConf = storeConf.withExtraOptions(Map(
+    StateStoreConf.FORMAT_VALIDATION_ENABLED_CONFIG -> "false",
+    StateStoreConf.FORMAT_VALIDATION_CHECK_VALUE_CONFIG -> "false"
+  ))
+
+  // Override provider to enable column families support
+  override protected lazy val provider: StateStoreProvider = {
+    val stateStoreId = StateStoreId(partition.sourceOptions.stateCheckpointLocation.toString,
+      partition.sourceOptions.operatorId, partition.partition, partition.sourceOptions.storeName)
+    val stateStoreProviderId = StateStoreProviderId(stateStoreId, partition.queryId)
+
+    val useMultipleValuesPerKey = SchemaUtil.checkVariableType(stateVariableInfoOpt,
+      StateVariableType.ListState)
+
+    val provider = StateStoreProvider.createAndInit(
+      stateStoreProviderId, keySchema, valueSchema, keyStateEncoderSpec,
+      useColumnFamilies = true, // Enable column families support
+      modifiedStoreConf, hadoopConf.value,
+      useMultipleValuesPerKey = useMultipleValuesPerKey, stateSchemaProviderOpt)
+    provider
+  }
+
   private lazy val stateStore: StateStore = {
     provider.getStore(partition.sourceOptions.batchId + 1, forceSnapshotOnCommit = true)
   }
 
+  /**
+   * Extracts the number of fields from UnsafeRow bytes.
+   * UnsafeRow format stores the field count as a little-endian integer in the first 4 bytes.
+   */
+  private def extractFieldCount(bytes: Array[Byte]): Int = {
+    if (bytes.length < 4) {
+      throw new IOException(s"Invalid UnsafeRow bytes: length ${bytes.length} < 4")
+    }
+    // Read little-endian integer from first 4 bytes
+    Platform.getInt(bytes, Platform.BYTE_ARRAY_OFFSET)
+  }
+
   override def write(record: InternalRow): Unit = {
     try {
+      // Validate record schema
+      if (record.numFields != 4) {
+        throw new IOException(
+          s"Invalid record schema: expected 4 fields (partition_key, key_bytes, value_bytes, " +
+          s"column_family_name), got ${record.numFields}")
+      }
+
       // Extract raw bytes and column family name from the record
       val keyBytes = record.getBinary(1)
       val valueBytes = record.getBinary(2)
       val colFamilyName = record.getString(3)
-      
+
       // Reconstruct UnsafeRow objects from the raw bytes
       // The bytes are in UnsafeRow memory format from StatePartitionReaderAllColumnFamilies
-      val keyRow = new UnsafeRow(keySchema.fields.length)
       keyRow.pointTo(keyBytes, Platform.BYTE_ARRAY_OFFSET, keyBytes.length)
-      
-      val valueRow = new UnsafeRow(valueSchema.fields.length)
+
       valueRow.pointTo(valueBytes, Platform.BYTE_ARRAY_OFFSET, valueBytes.length)
       
       // Use StateStore API which handles proper RocksDB encoding (version byte, checksums, etc.)
