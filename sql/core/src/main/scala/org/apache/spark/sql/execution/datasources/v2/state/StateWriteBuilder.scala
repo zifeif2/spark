@@ -16,7 +16,6 @@
  */
 package org.apache.spark.sql.execution.datasources.v2.state
 
-import java.io.IOException
 import java.util.UUID
 
 import org.apache.spark.internal.Logging
@@ -24,7 +23,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write._
 import org.apache.spark.sql.execution.streaming.operators.stateful.transformwithstate.TransformWithStateVariableInfo
-import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, StateSchemaProvider, StateStore, StateStoreColFamilySchema, StateStoreConf, StateStoreId, StateStoreProviderId}
+import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, StateSchemaProvider, StateStoreColFamilySchema, StateStoreConf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.SerializableConfiguration
 
@@ -117,7 +116,7 @@ private class StateBatchWrite(
       stateVariableInfoOpt,
       stateStoreColFamilySchemaOpt,
       stateSchemaProviderOpt,
-      hadoopConfBroadcast)
+      hadoopConfBroadcast.value)
   }
 
   override def useCommitCoordinator(): Boolean = {
@@ -163,7 +162,7 @@ private class StateDataWriterFactory(
     // Create a StateStoreInputPartition for this writer
     val queryId = UUID.randomUUID()
     val partition = new StateStoreInputPartition(partitionId, queryId, sourceOptions)
-    
+
     new StatePartitionAllColumnFamiliesWriter(
       stateConf,
       hadoopConfBroadcast,

@@ -23,16 +23,16 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.connector.write.{DataWriter, WriterCommitMessage}
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
-import org.apache.spark.sql.execution.streaming.operators.stateful.join.SymmetricHashJoinStateManager
 import org.apache.spark.sql.execution.streaming.operators.stateful.transformwithstate.{StateVariableType, TransformWithStateVariableInfo}
-import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, StateStore, StateStoreColFamilySchema, StateStoreConf, StateStoreId, StateStoreProvider, StateStoreProviderId, StateSchemaProvider}
+import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, StateSchemaProvider, StateStore, StateStoreColFamilySchema, StateStoreConf, StateStoreId, StateStoreProvider, StateStoreProviderId}
 import org.apache.spark.sql.types.{NullType, StructField, StructType}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.SerializableConfiguration
 
 /**
- * An abstract base class for [[DataWriter]] implementations that write data to state store partitions.
- * This class provides common functionality for different state store writer implementations.
+ * An abstract base class for [[DataWriter]] implementations that write data to state store
+ * partitions. This class provides common functionality for different state store writer
+ * implementations.
  *
  * @param storeConf The state store configuration
  * @param hadoopConf The Hadoop configuration
@@ -64,6 +64,8 @@ abstract class StatePartitionWriterBase(
   protected val keySchema: StructType = {
     if (SchemaUtil.checkVariableType(stateVariableInfoOpt, StateVariableType.MapState)) {
       SchemaUtil.getCompositeKeySchema(schema, partition.sourceOptions)
+    } else if (partition.sourceOptions.internalOnlyReadAllColumnFamilies) {
+      schemaForValueRow
     } else {
       SchemaUtil.getSchemaAsDataType(schema, "key").asInstanceOf[StructType]
     }
@@ -71,24 +73,10 @@ abstract class StatePartitionWriterBase(
 
   protected val valueSchema: StructType = if (stateVariableInfoOpt.isDefined) {
     schemaForValueRow
+  } else if (partition.sourceOptions.internalOnlyReadAllColumnFamilies) {
+    schemaForValueRow
   } else {
     SchemaUtil.getSchemaAsDataType(schema, "value").asInstanceOf[StructType]
-  }
-
-  protected def getStoreUniqueId(
-      operatorStateUniqueIds: Option[Array[Array[String]]]): Option[String] = {
-    SymmetricHashJoinStateManager.getStateStoreCheckpointId(
-      storeName = partition.sourceOptions.storeName,
-      partitionId = partition.partition,
-      stateStoreCkptIds = operatorStateUniqueIds)
-  }
-
-  protected def getStartStoreUniqueId: Option[String] = {
-    getStoreUniqueId(partition.sourceOptions.startOperatorStateUniqueIds)
-  }
-
-  protected def getEndStoreUniqueId: Option[String] = {
-    getStoreUniqueId(partition.sourceOptions.endOperatorStateUniqueIds)
   }
 
   protected lazy val provider: StateStoreProvider = {
@@ -155,9 +143,10 @@ abstract class StatePartitionWriterBase(
 }
 
 /**
- * A [[DataWriter]] implementation that writes data to all column families in a state store partition.
- * This writer is designed to work with data read by [[StatePartitionReaderAllColumnFamilies]],
- * allowing for reading state from all column families and writing it back.
+ * A [[DataWriter]] implementation that writes data to all column families in a state store
+ * partition. This writer is designed to work with data read by
+ * [[StatePartitionReaderAllColumnFamilies]], allowing for reading state from all column
+ * families and writing it back.
  *
  * @param storeConf The state store configuration
  * @param hadoopConf The Hadoop configuration
@@ -252,10 +241,18 @@ class StatePartitionAllColumnFamiliesWriter(
 
       // Reconstruct UnsafeRow objects from the raw bytes
       // The bytes are in UnsafeRow memory format from StatePartitionReaderAllColumnFamilies
-      keyRow.pointTo(keyBytes, Platform.BYTE_ARRAY_OFFSET, keyBytes.length)
+      val keyRow = new UnsafeRow(1)
+      keyRow.pointTo(keyBytes, Platform.BYTE_ARRAY_OFFSET,
+        keyBytes.length)
+      println("before decoding keyBytes size: ", keyBytes.length)
+      println("before decoding valueBytes size: ", valueBytes.length)
+      println("Platform.BYTE_ARRAY_OFFSET", Platform.BYTE_ARRAY_OFFSET)
 
-      valueRow.pointTo(valueBytes, Platform.BYTE_ARRAY_OFFSET, valueBytes.length)
-      
+      val valueRow = new UnsafeRow(4)
+      valueRow.pointTo(valueBytes,
+        Platform.BYTE_ARRAY_OFFSET,
+        valueBytes.length)
+
       // Use StateStore API which handles proper RocksDB encoding (version byte, checksums, etc.)
       stateStore.put(keyRow, valueRow, colFamilyName)
       recordsWritten += 1
