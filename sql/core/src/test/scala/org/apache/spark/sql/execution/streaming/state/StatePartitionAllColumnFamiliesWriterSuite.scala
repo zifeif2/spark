@@ -427,8 +427,7 @@ class StatePartitionAllColumnFamiliesWriterCkptV1Suite extends StateDataSourceTe
       }
     }
 
-    // Run transformWithState tests with enable/disable checkpoint V2
-    testWithChangelogConfig("SPARK-54420: aggregation state ver 1 (ckpt v1)") {
+    testWithChangelogConfig("SPARK-54420: aggregation state ver 1") {
       testRoundTripForAggrStateVersion(1)
     }
 
@@ -437,8 +436,8 @@ class StatePartitionAllColumnFamiliesWriterCkptV1Suite extends StateDataSourceTe
         testStreamStreamJoinRoundTrip(version)
       }
     }
-    // Run transformWithState tests with different encoding formats
 
+    // Run transformWithState tests with different encoding formats
     def testWithChangelogAndEncodingConfig(testName: String)(testFun: => Unit): Unit = {
       Seq("unsaferow", "avro").foreach { encodingFormat =>
         testWithChangelogConfig(
